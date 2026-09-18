@@ -1,0 +1,139 @@
+-- * Metronome IM *
+--
+-- This file is part of the Metronome XMPP server and is released under the
+-- ISC License, please see the LICENSE file in this source package for more
+-- information about copyright and licensing.
+
+-- This contains the auxiliary utility functions for Metronome's env.
+
+local CFG_SOURCEDIR, metronome = _G.CFG_SOURCEDIR, _G.metronome;
+local open, popen = io.open, io.popen;
+local base64 = require "util.encodings".base64.encode;
+local char, next, os_time, pairs, tonumber, tostring, type = string.char, next, os.time, pairs, tonumber, tostring, type;
+
+local _ENV, _M = nil, {};
+local clone_table, clean_table, generate_secret;
+
+function _M.read_version()
+	local version_file = open((CFG_SOURCEDIR or ".").."/metronome.version");
+	if version_file then
+		metronome.version = version_file:read("*a"):gsub("%s*$", "");
+		version_file:close();
+	else
+		metronome.version = "unknown";
+	end
+end
+
+function _M.get_openssl_version()
+	-- will possibly work only on linux likes which have a globally installed
+	-- openssl.
+	local version = popen("openssl version"):read();
+	if version then
+		version = version:match("^OpenSSL%s([%d%p]+)"):gsub("%p", "");
+		return tonumber(version);
+	else
+		return false;
+	end
+end
+
+function _M.ripairs(t)
+	local function reverse(t,index)
+		index = index-1;
+		local value = t[index];
+		if value == nil then return value; end
+		return index, value;
+	end
+	return reverse, t, #t+1;
+end
+
+function clone_table(t)
+	local clone = {};
+	for key, value in pairs(t) do
+		if type(value) == "table" then
+			clone[key] = clone_table(value);
+		else
+			clone[key] = value;
+		end
+	end
+	return clone;
+end
+
+function clean_table(t)
+	for key, value in pairs(t) do
+		if type(value) == "table" and not next(value) then
+			t[key] = nil;
+		elseif type(value) == "table" then
+			clean_table(value);
+			if not next(value) then t[key] = nil; end
+		end
+	end
+end
+
+function _M.escape_magic_chars(string)
+	-- escape magic characters
+	string = string:gsub("%(", "%%(")
+	string = string:gsub("%)", "%%)")
+	string = string:gsub("%.", "%%.")
+	string = string:gsub("%%", "%%")
+	string = string:gsub("%+", "%%+")
+	string = string:gsub("%-", "%%-")
+	string = string:gsub("%*", "%%*")
+	string = string:gsub("%?", "%%?")
+	string = string:gsub("%[", "%%[")
+	string = string:gsub("%]", "%%]")
+	string = string:gsub("%^", "%%^")
+	string = string:gsub("%$", "%%$")
+
+	return string
+end
+
+function _M.html_escape(t)
+	if t then
+		t = t:gsub("<", "&lt;");
+		t = t:gsub(">", "&gt;");
+		t = t:gsub("(http://[%a%d@%.:/&%?=%-_#%%~]+)", function(h)
+			h = h:gsub("+", " ");
+			h = h:gsub("%%(%x%x)", function(h) return char(tonumber(h,16)) end);
+			h = h:gsub("\r\n", "\n");
+			return "<a href='" .. h .. "'>" .. h .. "</a>";
+		end);
+		t = t:gsub("\n", "<br />");
+		t = t:gsub("%%", "%%%%");
+	else
+		t = "";
+	end
+	return t;
+end
+
+function _M.load_file(f, mode)
+	local file, err, ret = open(f, mode or "r");
+	if file then
+		ret = file:read("*a");
+		file:close();
+	end
+	return ret, err;
+end
+
+function generate_secret(bytes)
+	local n, urandom = 0;
+	repeat
+		local f = open("/dev/urandom", "r");
+		if f then
+			urandom = f:read(bytes or 256);
+			f:close();
+		end
+		n = n + 1;
+	until urandom ~= nil or n == 30;
+
+	return (urandom and base64(urandom)) or nil;
+end
+
+function _M.generate_shortid()
+	local bits = generate_secret(9);
+	return bits and bits:gsub("/", ""):gsub("%+", "") .. tostring(os_time()):match("%d%d%d%d$");
+end
+
+_M.clone_table = clone_table;
+_M.clean_table = clean_table;
+_M.generate_secret = generate_secret;
+return _M;

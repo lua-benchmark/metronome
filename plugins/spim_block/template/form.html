@@ -1,0 +1,42 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Metronome SPIM Block</title>
+    <link rel="stylesheet" type="text/css" href="css/style.css" />
+    <link rel="icon" type="image/png" href="/assets/favicon.png" />
+    <meta charset="utf-8" />
+    <script type="text/javascript">
+      var onloadCallback = function () {
+        grecaptcha.render('recaptcha', {
+          'sitekey': '%RECAPTCHA-KEY'
+        });
+      };
+    </script>
+</head>
+
+<body>
+<div id='top'>
+  <div id='header'>
+    <img src="images/header.png" />
+  </div>
+</div>
+
+<div id='main'>
+    <p>
+    Please insert the provided token to unlock communication with a user on this server,
+    <br />note that this form is protected by reCAPTCHA meaning, that your IP address will be
+    <br />logged by our systems and sent to Google Servers to better help identifying bots from
+    <br />true users. Should you not agree with that you can always ask the contact through other
+    <br />means to add you to his or her contact list instead.
+    </p>
+    <form action='%REG-URL' method='post' accept-charset='UTF-8' id='spim'>
+        <div><label for='set-token'>Anti-SPIM Token:</label><br /></div>
+        <div><input type='text' name='spim_token' id='set-token' value="" /></div>
+        <div><br /></div>
+        <div id="recaptcha"></div>
+        <div><br /><input type='submit' id='connect' value='Unlock' class='btn' /></div>
+    </form>
+</div>
+<script src='https://www.google.com/recaptcha/api.js?onload=onloadCallback&amp;render=explicit'></script>
+</body>
+</html>
