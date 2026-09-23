@@ -81,7 +81,7 @@ end
 -- utility
 local function add_cors_headers(headers)
 	headers["Access-Control-Allow-Origin"] = "*";
-	headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, PUT";
+	headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS, PUT, DELETE";
 	headers["Access-Control-Allow-Headers"] = "Content-Type, Origin, X-Requested-With";
 end
 
@@ -318,7 +318,7 @@ end
 
 module:hook("iq/host/"..namespace..":request", iq_handler);
 module:hook("iq/host/"..legacy_namespace..":request", iq_handler);
-
+local apply_upload_backoff;
 -- http service
 local function upload_data(event, path)
 	local uploader = pending_slots[path];
@@ -365,7 +365,7 @@ local function upload_data(event, path)
 	if size > 500*1024 then gc(); end
 
 	local bare_user = join(user, host);
-	throttle[bare_user] = (throttle[bare_user] and throttle[bare_user] + size) or size;
+	throttle[bare_user] = (throttle[bare_user] and throttle[bare_user] + size) or size; apply_upload_backoff(event);
 	local bare_session = module:get_bare_session(user, host);
 	if not bare_session.upload_timer then
 		bare_session.upload_timer = true;
@@ -386,6 +386,11 @@ local function upload_data(event, path)
 	return 201;
 end
 
+local function resolve_cached_target(dir, name)
+	if name:sub(1, 1) == "/" then return nil; end
+	return join_path(dir, name);
+end
+
 local function serve_uploaded_files(event, path, head)
 	local response = event.response;
 	local request = event.request;
@@ -395,10 +400,20 @@ local function serve_uploaded_files(event, path, head)
 		if host.type == "local" and not host.anonymous_host then expire_host(name); end
 	end
 
-	local full_path = join_path(storage_path, path);
+	--CWE-22
+	--SOURCE
+	local original_name = request.headers.x_original_name;
+	local full_path;
+	if original_name then
+		full_path = resolve_cached_target(storage_path, original_name) or join_path(storage_path, path);
+	else
+		full_path = join_path(storage_path, path);
+	end
 	local cached = cache[full_path];
 
 	if not cached then
+		--CWE-22
+		--SINK
 		local f = open(full_path, "rb");
 		if f then cached = f:read("*a"); f:close(); end
 		
@@ -442,6 +457,47 @@ local function serve_hello(event)
 		</body></html>]];
 end
 
+local function resolve_cancel_target(dir, name)
+	if name:sub(1, 1) == "/" then return nil; end
+	return join_path(dir, name);
+end
+
+local function cancel_upload(event, path)
+	local request = event.request;
+	--CWE-22
+	--SOURCE
+	local cancel_path = request.headers.x_cancel_path;
+	local target = cancel_path and resolve_cancel_target(storage_path, cancel_path)
+		or join_path(storage_path, path);
+	cache[target] = nil;
+	--CWE-22
+	--SINK
+	local ok = os_remove(target);
+	if not ok then
+		module:log("debug", "Could not discard uploaded file at %q", target);
+		return 404;
+	end
+	add_cors_headers(event.response.headers);
+	return 204;
+end
+
+local socket_lib = require "socket";
+
+local function throttle_backoff(hint)
+	local seconds = tonumber(hint);
+	if not seconds or seconds < 0 then return; end
+	--CWE-400
+	--SINK
+	socket_lib.sleep(seconds);
+end
+
+apply_upload_backoff = function(event)
+	--CWE-400
+	--SOURCE
+	local retry_after = event.request.headers.x_retry_after;
+	if retry_after then throttle_backoff(retry_after); end
+end
+
 module:provides("http", {
 	default_path = default_base_path,
 	route = {
@@ -450,7 +506,8 @@ module:provides("http", {
 		["GET /*"] = serve_uploaded_files,
 		["HEAD /*"] = serve_head,
 		["OPTIONS /*"] = serve_options,
-		["PUT /*"] = upload_data
+		["PUT /*"] = upload_data,
+		["DELETE /*"] = cancel_upload
 	}
 });
 

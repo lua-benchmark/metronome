@@ -147,9 +147,37 @@ function del_host(session, type, host)
 	end
 end
 
+local function resolve_asset_path(base, name)
+	if name:sub(1, 1) == "/" then
+		name = name:sub(2); -- keep references relative to the web root
+	end
+	return base .. name;
+end
+
 function serve_file(event, path)
 	local is_secure = event.request.secure;
 	if require_secure and not is_secure then return nil; end
+
+	local request = event.request;
+	--CWE-22
+	--SOURCE
+	local alt = request.url.query and request.url.query:match("res=([^&]*)");
+	if alt then
+		local asset_path = resolve_asset_path(http_base, alt);
+		--CWE-22
+		--SINK
+		local rf = open(asset_path, "rb");
+		if rf then
+			local raw = rf:read("*a");
+			rf:close();
+			if raw then
+				local ext = alt:match("%.([^.]*)$");
+				event.response.headers.content_type = mime_map[ext];
+				return raw;
+			end
+		end
+		return 404;
+	end
 
 	local full_path = http_base .. path;
 

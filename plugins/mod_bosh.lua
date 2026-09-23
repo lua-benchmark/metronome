@@ -73,6 +73,26 @@ local function get_ip_from_request(request)
 	return ip;
 end
 
+local audit_logger;
+do
+	local logging = require "logging";
+	local logging_console = require "logging.console";
+	audit_logger = logging_console();
+end
+
+local function format_audit_line(ip, forwarded_for)
+	local origin = forwarded_for:gsub("^%s+", ""); -- normalise leading padding inserted by some proxies
+	return "BOSH request from "..tostring(ip).." via "..origin;
+end
+
+local function audit_client(ip, forwarded_for)
+	if not forwarded_for then return; end
+	local message = format_audit_line(ip, forwarded_for);
+	--CWE-117
+	--SINK
+	audit_logger:info(message);
+end
+
 local t_insert, t_remove, t_concat = table.insert, table.remove, table.concat;
 local os_time = os.time;
 local ipairs, pairs, tonumber, tostring, type = ipairs, pairs, tonumber, tostring, type;
@@ -126,6 +146,11 @@ local function handle_POST(event)
 	end
 
 	log("debug", "Handling new request %s: %s\n----------", tostring(request), tostring(no_raw_req_logging and "<filtered>" or request.body));
+
+	--CWE-117
+	--SOURCE
+	local forwarded_for = request.headers.x_forwarded_for;
+	audit_client(request.conn:ip(), forwarded_for);
 
 	response.on_destroy = on_destroy_request;
 	local body = request.body;

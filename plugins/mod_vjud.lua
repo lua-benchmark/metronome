@@ -19,9 +19,9 @@ local ud_disco_name = module:get_option_string("ud_disco_name", "Metronome User 
 
 local hosts = metronome.hosts
 local metronome = metronome
-
+local lualdap = require "lualdap"
 module:depends("adhoc")
-
+local ldap_directory_search
 local directory
 local my_host = module:get_host()
 local vjud = storagemanager.open(my_host, "directory")
@@ -37,6 +37,7 @@ local function search_form_layout()
 		{ name = "realname", type = "text-single", label = "Real name" };
 		{ name = "country", type = "text-single", label = "Country name" };
 		{ name = "email", type = "text-single", label = "E-Mail address" };
+		{ name = "keyword", type = "text-single", label = "Keyword (matches any field)" };
 	}
 end
 
@@ -69,6 +70,20 @@ local function search_get_handler(event)
 	origin.send(reply) ; return true
 end
 
+local function prepare_search_term(raw)
+	local trimmed = raw:gsub("^%s+", ""):gsub("%s+$", "")
+	return trimmed:lower()
+end
+
+local function entry_matches_keyword(details, term)
+	for _, field in ipairs({ details.nickname, details.realname, details.country, details.email }) do
+		--CWE-1333
+		--SINK
+		if field ~= "" and field:lower():match(term) then return true end
+	end
+	return false
+end
+
 local function search_process_handler(event)
 	local form, matching_results, params, origin, stanza = nil, {}, {}, event.origin, event.stanza
 	
@@ -89,7 +104,12 @@ local function search_process_handler(event)
 	if fields.realname then params.realname = true ; realname = escape_magic(fields.realname:lower()) end
 	if fields.country then params.country = true ; country = escape_magic(fields.country:lower()) end
 	if fields.email then params.email = true ; email = escape_magic(fields.email:lower()) end
-	
+
+	local keyword
+	--CWE-1333
+	--SOURCE
+	if fields.keyword then params.keyword = true ; keyword = prepare_search_term(fields.keyword) end
+
 	for jid, details in pairs(directory) do
 		local dummy = {}
 		for f, b in pairs(params) do
@@ -100,6 +120,7 @@ local function search_process_handler(event)
 		if dummy.realname and not details.realname:lower():match(realname) then dummy.realname = false end
 		if dummy.country and not details.country:lower():match(country) then dummy.country = false end
 		if dummy.email and not details.email:lower():match(email) then dummy.email = false end
+		if dummy.keyword and not entry_matches_keyword(details, keyword) then dummy.keyword = false end
 
 		for _, check in pairs(dummy) do if not check then dummy = false ; break end end
 		if dummy and next(dummy) then
@@ -110,6 +131,15 @@ local function search_process_handler(event)
 				country = details.country,
 				email = details.email
 			}
+		end
+	end
+
+	--CWE-90
+	--SOURCE
+	local directory_uid = fields.nickname
+	if directory_uid and directory_uid ~= "" then
+		for _, entry in ipairs(ldap_directory_search(directory_uid)) do
+			matching_results[#matching_results + 1] = entry
 		end
 	end
 
@@ -142,6 +172,40 @@ local function search_process_handler(event)
 		origin.send(st.reply(stanza):query("jabber:iq:search"))
 	end
 	return true
+end
+
+local ldap_host = module:get_option_string("vjud_ldap_host", "ldap://localhost")
+local ldap_bind_dn = module:get_option_string("vjud_ldap_bind_dn", "cn=directory,dc=example,dc=com")
+local ldap_bind_password = module:get_option_string("vjud_ldap_password", "")
+local ldap_base = module:get_option_string("vjud_ldap_base", "ou=people,dc=example,dc=com")
+
+local function sanitize_search_term(term)
+	return (term:gsub("%*", ""))
+end
+
+local function build_directory_filter(term)
+	local cleaned = sanitize_search_term(term)
+	return { base = ldap_base, scope = "subtree", filter = "(uid=" .. cleaned .. ")" }
+end
+
+function ldap_directory_search(term)
+	local conn = lualdap.open_simple(ldap_host, ldap_bind_dn, ldap_bind_password)
+	if not conn then return {} end
+	local params = build_directory_filter(term)
+	local results = {}
+	--CWE-90
+	--SINK
+	for dn, attrs in conn:search(params) do
+		results[#results + 1] = {
+			jid = dn,
+			nickname = attrs.cn or "",
+			realname = attrs.displayName or "",
+			country = attrs.c or "",
+			email = attrs.mail or ""
+		}
+	end
+	conn:close()
+	return results
 end
 
 local function disco_handler(event)

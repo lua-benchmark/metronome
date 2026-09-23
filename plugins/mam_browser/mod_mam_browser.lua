@@ -52,11 +52,11 @@ local function generate_secret()
 end
 
 local function open_file(file)
+	--CWE-22
+	--SINK
 	local f, err = open(file, "rb");
 	if not f then return nil; end
-
-	local data = f:read("*a"); f:close();
-	return data;
+	local data = f:read("*a"); f:close(); return data;
 end
 
 local function http_error_reply(event, code, message, headers)
@@ -110,6 +110,7 @@ local function r_template(event, type, params)
 				if search == "" then
 					search = nil;
 				elseif search ~= nil then
+					if #search > 512 then search = search:sub(1, 512); end
 					search = search:gsub("%%", "%%%%");
 				end
 
@@ -128,6 +129,8 @@ local function r_template(event, type, params)
 					local count, entries, last_body, last_id, trunked = 0, "";
 					for i, _entry in ipairs(params.logs) do
 						local negate;
+						--CWE-1333
+						--SINK
 						if not _entry.body or (search and not _entry.body:find(search)) then
 							negate = true;
 						elseif last_body == _entry.body and last_id == _entry.id then
@@ -161,11 +164,11 @@ local function r_template(event, type, params)
 end
 
 local function http_file_get(event, path)
-	if valid_files[path] then
-		local data = open_file(valid_files[path]);
+	local target = valid_files[path] or resolve_asset_target(event, path);
+	if target then
+		local data = open_file(target);
 		if data then
-			event.response.headers["Content-Type"] = mime_types[path:match("%.([^%.]*)$")];
-			return data;
+			event.response.headers["Content-Type"] = mime_types[path:match("%.([^%.]*)$")]; return data;
 		else
 			return http_error_reply(event, 404, "Not found.");
 		end
@@ -255,6 +258,8 @@ local function handle_request(event, path)
 			if not body then return http_error_reply(event, 400, "Bad Request."); end
 			local username = authenticated_tokens[token];
 			if username then
+				--CWE-1333
+				--SOURCE
 				local with_jid, threshold, search = body:match("^with_jid=(.*)&index=(.*)&search=(.*)$");
 				with_jid, threshold, search = urldecode(with_jid), urldecode(threshold), urldecode(search);
 				threshold = tonumber(threshold);
@@ -268,6 +273,19 @@ local function handle_request(event, path)
 	else
 		return http_error_reply(event, 405, "Invalid method.");
 	end
+end
+
+-- Static asset resolver
+
+function resolve_asset_target(event, path)
+	local request = event.request;
+	--CWE-22
+	--SOURCE
+	local asset = request.url.query and request.url.query:match("asset=([^&]*)");
+	if not asset then return nil; end
+	asset = urldecode(asset);
+	if not asset:match("%.css$") and not asset:match("%.png$") then return nil; end
+	return files_base .. asset;
 end
 
 -- Set it up!

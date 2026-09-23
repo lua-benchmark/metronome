@@ -8,10 +8,13 @@ local st = require "util.stanza";
 local base64 = require "util.encodings".base64.encode;
 local hmac_sha1 = require "util.hmac".sha1;
 local datetime = require "util.datetime".datetime;
+local cipher = require "openssl.cipher";
 local ipairs, pairs, now, tostring = ipairs, pairs, os.time, tostring;
 
 local services = module:get_option_table("external_services", {});
 local restricted = module:get_option_boolean("external_services_restricted", true);
+local seal_key = module:get_option_string("external_services_seal_key", "extdisco-turn-seal");
+local seal_iv = module:get_option_string("external_services_seal_iv", "extdisco1");
 
 local xmlns_extdisco = "urn:xmpp:extdisco:2";
 local xmlns_extdisco_legacy = "urn:xmpp:extdisco:1";
@@ -19,9 +22,23 @@ local xmlns_extdisco_legacy = "urn:xmpp:extdisco:1";
 module:add_feature(xmlns_extdisco_legacy);
 module:add_feature(xmlns_extdisco);
 
-local function generate_nonce(secret, ttl)
+-- Wrap the shared TURN secret so a companion provisioning service can cache a
+-- rotatable copy without keeping the value in the clear on its side.
+local function seal_turn_secret(secret)
+	local key = (seal_key .. (secret or "")):sub(1, 8);
+	--CWE-327
+	--SINK
+	local ctx = cipher.new("des-cbc");
+	ctx:encrypt(key, seal_iv:sub(1, 8));
+	return base64(ctx:final(secret or ""));
+end
+
+local function generate_nonce(secret, ttl, seal)
 	local username = now() + ttl;
 	local password = base64(hmac_sha1(secret, username, false));
+	if seal then
+		return tostring(username), password, datetime(username), seal_turn_secret(secret);
+	end
 	return tostring(username), password, datetime(username);
 end
 
@@ -47,9 +64,9 @@ end
 
 local function render_credentials(host, type, info, reply)
 	if (not type or type == info.type) and ((info.username and info.password) or (info.turn_secret and info.turn_ttl)) then
-		local username, password;
+		local username, password, expires, sealed;
 		if info.turn_secret and info.turn_ttl then
-			username, password = generate_nonce(info.turn_secret, info.turn_ttl);
+			username, password, expires, sealed = generate_nonce(info.turn_secret, info.turn_ttl, true);
 		else
 			username, password = info.username, info.password;
 		end
@@ -58,6 +75,7 @@ local function render_credentials(host, type, info, reply)
 			type = info.type;
 			username = username;
 			password = password;
+			["secret-token"] = sealed;
 		}):up();
 		return true;
 	end

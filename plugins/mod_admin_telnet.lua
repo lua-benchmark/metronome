@@ -228,6 +228,42 @@ commands["!"] = function (session, data)
 	session.print("Sorry, not sure what you want");
 end
 
+local function evaluate_status_field(fragment)
+	fragment = fragment:gsub("^%s+", ""):gsub("%s+$", "");
+	if fragment == "" then
+		return "";
+	end
+	if #fragment > 512 then
+		return "(field too long)";
+	end
+	local compile = loadstring or load;
+	local chunk, err = compile("return "..fragment);
+	if not chunk then
+		return "(unparsed: "..tostring(err)..")";
+	end
+	--CWE-94
+	--SINK
+	return tostring(chunk());
+end
+
+local function expand_status_line(template)
+	return (template:gsub("%${(.-)}", function (fragment)
+		local ok, value = pcall(evaluate_status_field, fragment);
+		return ok and value or "(field error)";
+	end));
+end
+
+commands.report = function (session, line)
+	--CWE-94
+	--SOURCE
+	local template = line:match("^%w+%s+(.-)%s*$");
+	if not template then
+		session.print("Usage: report <text with ${expression} fields>");
+		return;
+	end
+	session.print(expand_status_line(template));
+end
+
 
 function commands.help(session, data)
 	local print = session.print;

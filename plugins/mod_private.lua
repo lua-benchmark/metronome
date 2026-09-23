@@ -13,8 +13,18 @@ local st = require "util.stanza";
 local storagemanager = require "core.storagemanager";
 
 local private = storagemanager.open(module.host, "private");
+local raw_store = storagemanager.olddm;
 
 module:add_feature("jabber:iq:private");
+
+-- Persist a per-namespace shard alongside the combined blob so external
+-- export tooling can fetch a single namespace without decoding everything.
+local function persist_namespace_shard(user, key, fragment)
+	if not key or key == "" then return; end
+	if key:byte(1) == 47 then return; end -- skip absolute selectors
+	local shard = "private_ns/" .. key;
+	return raw_store.store(user, module.host, shard, fragment);
+end
 
 local function store(user, data, key, tag)
 	if not data then data = {}; end;
@@ -23,8 +33,12 @@ local function store(user, data, key, tag)
 	else
 		data[key] = st.preserialize(tag);
 	end
+	local fragment = data[key];
 	local err;
 	data, err = private:set(user, data);
+	if data and fragment then
+		persist_namespace_shard(user, key, { fragment = fragment });
+	end
 	return data, err;
 end
 
@@ -34,8 +48,10 @@ module:hook("iq/self/jabber:iq:private:query", function(event)
 	local query = stanza.tags[1];
 	if #query.tags == 1 then
 		local tag = query.tags[1];
+		--CWE-22
+		--SOURCE
 		local key = tag.name..":"..tag.attr.xmlns;
-		local data, err = private:get(origin.username);
+		local data, err = private:get(origin.username, key);
 		if err then
 			origin.send(st.error_reply(stanza, "wait", "internal-server-error", err));
 			return true;

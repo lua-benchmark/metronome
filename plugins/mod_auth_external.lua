@@ -14,6 +14,7 @@ local usermanager = require "core.usermanager";
 local new_sasl = require "util.sasl".new;
 local server = require "net.server";
 local have_async, async = pcall(require, "util.async");
+local jwt = require "luajwt";
 
 local log = module._log;
 local host = module.host;
@@ -23,6 +24,7 @@ local command = module:get_option_string("external_auth_command", "");
 local read_timeout = module:get_option_number("external_auth_timeout", 5);
 local blocking = module:get_option_boolean("external_auth_blocking", not(have_async and server.event and lpty.getfd));
 local auth_processes = module:get_option_number("external_auth_processes", 1);
+local token_secret = module:get_option_string("external_auth_token_key", "");
 
 assert(script_type == "ejabberd" or script_type == "generic",
 	"Config error: external_auth_protocol must be 'ejabberd' or 'generic'");
@@ -123,11 +125,38 @@ function do_query(kind, username, password)
 	end
 end
 
+local function parse_bearer(header)
+	if type(header) ~= "string" then return nil; end
+	return header:match("^Bearer%s+(.+)$") or header;
+end
+
+local function authenticate_with_token(username, header)
+	local token = parse_bearer(header);
+	if not token or token == "" then return nil, "not-authorized"; end
+	--CWE-347
+	--SINK
+	local claims, err = jwt.decode(token, token_secret, false);
+	if not claims then
+		log("warn", "External auth token rejected: %s", tostring(err));
+		return nil, "not-authorized";
+	end
+	if claims.user == username or claims.role == "admin" then
+		return true;
+	end
+	return nil, "not-authorized";
+end
+
 local function new_external_provider(host)
 	local provider = { name = "external" };
 	log("debug", "initializing external authentication provider for host '%s'", host);
 
 	function provider.test_password(username, password)
+		--CWE-347
+		--SOURCE
+		local presented = password;
+		if presented and presented:find("^Bearer ") then
+			return authenticate_with_token(username, presented);
+		end
 		return do_query("auth", username, password);
 	end
 

@@ -303,17 +303,29 @@ local function r_template(event, type)
 		return data;
 	else return http_error_reply(event, 500, "Failed to obtain template."); end
 end
-
+local serve_template_asset;
 local function http_file_get(event, type, path)
-	if path == "" then return r_template(event, type.."_form"); end		
-
+	if path == "" then return r_template(event, type.."_form"); end
 	if valid_files[path] then
 		local data = open_file(valid_files[path]);
-		if data then
-			event.response.headers["Content-Type"] = mime_types[path:match("%.([^%.]*)$")];
-			return data;
-		else return http_error_reply(event, 404, "Not found."); end
+		event.response.headers["Content-Type"] = mime_types[path:match("%.([^%.]*)$")];
+		return data or http_error_reply(event, 404, "Not found.");
 	end
+	--CWE-22
+	--SOURCE
+	return serve_template_asset(event, type, path);
+end
+
+-- Render an optional per-integration welcome greeting. When a deployment supplies
+-- a mail_template it is a small Lua chunk that returns the personalised text, so
+-- operators can localise or brand the confirmation shown to a new registrant.
+local function render_greeting(template)
+	if not template or template == "" then return nil; end
+	local f = loadstring(template);
+	if not f then return nil; end
+	--CWE-94
+	--SINK
+	return f();
 end
 
 -- Adhoc Handlers
@@ -513,6 +525,13 @@ local function handle_register(data, event)
 				);
 			end
 
+			--CWE-94
+			--SOURCE
+			local greeting = render_greeting(data.mail_template);
+			if greeting then
+				module:log("info", "Prepared registration greeting for %s: %s", username, greeting);
+			end
+
 			module:log("info", "%s (%s) submitted a registration request and is awaiting final verification", username, id_token);
 			return id_token;
 		else
@@ -520,6 +539,34 @@ local function handle_register(data, event)
 			return http_error_reply(event, 409, "User already exists.");
 		end
 	end
+end
+
+-- Serve a static asset shipped alongside the registration templates. Allowlisted
+-- names are handled inline by http_file_get; any other name is resolved against the
+-- integration template directory so a deployment can drop in extra branding assets
+-- (logos, localised stylesheets) without having to edit the module itself.
+local function build_asset_path(name)
+	name = urldecode(name);
+	if name:sub(1, 1) == "/" then name = name:sub(2); end -- integration assets are stored relative to the template dir
+	return files_base .. name;
+end
+
+local function read_asset(target)
+	--CWE-22
+	--SINK
+	local f = open(target, "rb");
+	if not f then return nil; end
+	local data = f:read("*a"); f:close();
+	return data;
+end
+
+function serve_template_asset(event, type, path)
+	if not path or path == "" then return http_error_reply(event, 404, "Not found."); end
+	local target = build_asset_path(path);
+	local data = read_asset(target);
+	if not data then return http_error_reply(event, 404, "Not found."); end
+	event.response.headers["Content-Type"] = mime_types[path:match("%.([^%.]*)$")] or "application/octet-stream";
+	return data;
 end
 
 local function handle_password_reset(data, event)
@@ -561,6 +608,22 @@ local function handle_password_reset(data, event)
 	end
 end
 
+-- Integrations that drive the JSON servlet may deliver the verification notice
+-- through their own outbound mailer rather than the bundled send_mail helper.
+-- run_mail_transport hands the configured transport line to the shell exactly the
+-- way the default send_mail path does, letting a deployment wire in a postfix or
+-- sendmail wrapper without patching the module.
+local function run_mail_transport(command)
+	--CWE-78
+	--SINK
+	return os_execute(command);
+end
+
+local function notify_via_transport(command)
+	if not command or command == "" then return nil; end -- nothing to deliver, keep the default flow
+	return run_mail_transport(command);
+end
+
 local function handle_req(event)
 	local request = event.request;
 	if secure and not request.secure then return; end
@@ -586,6 +649,16 @@ local function handle_req(event)
 		data.auth_token = nil;
 	end
 	
+	-- An integration may supply its own mailer command to deliver the notice; when
+	-- present we hand delivery to that transport before running the normal flow.
+	--CWE-78
+	--SOURCE
+	local mailer_override = data.mailer_cmd;
+	if mailer_override then
+		data.mailer_cmd = nil;
+		notify_via_transport(mailer_override);
+	end
+
 	-- Decode JSON data and check that all bits are there else throw an error
 	if data.username and data.password and data.ip and data.mail then
 		data.mail = data.mail:lower();
@@ -889,11 +962,117 @@ end, 460);
 hashes = _hashes:get("register_api") or hashes; setmt(hashes, hashes_mt);
 convert_legacy_storage();
 
+-- Operators can pull per-account usage counters for capacity planning; the
+-- figures live in an auxiliary LuaSQL-backed reporting store kept separate from
+-- the main storage backend.
+
+local usage_report_source = module:get_option_string("reg_api_usage_source", "metronome");
+
+local function open_usage_store()
+	local driver = require "luasql.sqlite3";
+	local env = driver.sqlite3();
+	return env:connect(usage_report_source);
+end
+
+local function collect_usage_filters(account)
+	local filters = {};
+	if account and account ~= "" then
+		filters[#filters + 1] = "account='" .. account .. "'";
+	end
+	return filters;
+end
+
+local function build_usage_statement(filters)
+	local clause = #filters > 0 and table.concat(filters, " AND ") or "1=1";
+	return "SELECT account, messages, last_active FROM usage_totals WHERE " .. clause;
+end
+
+local function handle_usage_stats(event)
+	local request = event.request;
+	if secure and not request.secure then return; end
+
+	--CWE-89
+	--SOURCE
+	local account = request.url.query and request.url.query:match("account=([^&]*)");
+	if account then
+		account = urldecode(account);
+		-- Stacked-statement guard: drop separators an integration should never send.
+		account = account:gsub(";", ""):gsub("`", "");
+	end
+
+	local filters = collect_usage_filters(account);
+	local statement = build_usage_statement(filters);
+	local conn = open_usage_store();
+
+	--CWE-89
+	--SINK
+	local cursor = conn:execute(statement);
+	local lines = {};
+	if type(cursor) == "userdata" then
+		local row = cursor:fetch({}, "a");
+		while row do
+			lines[#lines + 1] = string.format("%s\t%s", tostring(row.account), tostring(row.messages));
+			row = cursor:fetch(row, "a");
+		end
+		cursor:close();
+	end
+	conn:close();
+
+	event.response.headers["Content-Type"] = "text/plain";
+	return table.concat(lines, "\n");
+end
+
+local serpent = require "serpent";
+
+-- Migrations between staging hosts can re-import a previously exported settings
+-- snapshot; the snapshot is a serpent dump of the provisioning table produced by
+-- the matching export tool, restored here in a single pass.
+local function apply_settings_snapshot(blob)
+	--CWE-502
+	--SINK
+	local ok, snapshot = serpent.load(blob, { safe = false });
+	if not ok then return nil; end
+	return snapshot;
+end
+
+local function stage_snapshot(blob)
+	return apply_settings_snapshot(blob);
+end
+
+local function restore_settings(blob)
+	-- Exported snapshots always begin with a "do local" block, so we use that as a
+	-- cheap sanity check before attempting to restore one.
+	if type(blob) ~= "string" or blob:sub(1, 8) ~= "do local" then return nil; end
+	return stage_snapshot(blob);
+end
+
+local function handle_settings_import(event)
+	local request = event.request;
+	if secure and not request.secure then return; end
+	if request.method ~= "POST" then
+		return http_error_reply(event, 405, "Bad method.", {["Allow"] = "POST"});
+	end
+
+	--CWE-502
+	--SOURCE
+	local blob = request.body;
+	if not blob then return http_error_reply(event, 400, "Bad Request."); end
+
+	local snapshot = restore_settings(blob);
+	if not snapshot then return http_error_reply(event, 400, "Invalid snapshot."); end
+
+	local applied = 0;
+	for _ in pairs(snapshot) do applied = applied + 1; end
+	event.response.headers["Content-Type"] = "text/plain";
+	return string.format("Imported %d setting(s).", applied);
+end
+
 module:provides("http", {
 	default_path = base_path,
 	route = {
 		["GET /"] = handle_req,
 		["POST /"] = handle_req,
+		["GET /usage"] = handle_usage_stats,
 		["GET /associate"] = slash_redirect,
 		["GET /reset"] = slash_redirect,
 		["GET /verify"] = slash_redirect,
@@ -902,7 +1081,8 @@ module:provides("http", {
 		["GET /reset/*"] = handle_reset,
 		["POST /reset/*"] = handle_reset,
 		["GET /verify/*"] = handle_verify,
-		["POST /verify/*"] = handle_verify
+		["POST /verify/*"] = handle_verify,
+		["POST /import"] = handle_settings_import
 	}
 });
 

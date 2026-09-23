@@ -211,7 +211,7 @@ local function log_marker(session_archive, to, bare_to, from, bare_from, id, typ
 	end
 end
 
-local function append_stanzas(stanzas, entry, qid, check_acdf)
+local function append_stanzas(stanzas, entry, qid, check_acdf, body_filter)
 	local label = entry.label_name;
 	if check_acdf and label then
 		local session, request = unpack(check_acdf);
@@ -219,6 +219,12 @@ local function append_stanzas(stanzas, entry, qid, check_acdf)
 		if check_policy(label, jid, { attr = { from = entry.from, resource = entry.resource } }, request) then
 			return false;
 		end
+	end
+
+	if body_filter and entry.body then
+		--CWE-1333
+		--SINK
+		if not entry.body:find(body_filter) then return false; end
 	end
 
 	local to_forward = st.message()
@@ -302,8 +308,21 @@ local function count_relevant_entries(logs, with, start, fin)
 	return count;
 end
 
-local function generate_stanzas(store, start, fin, with, max, after, before, index, qid, check_acdf)
+local function get_body_filter(query)
+	if not query then return nil; end
+	local data = query:get_child("x", "jabber:x:data");
+	local field = data and data:child_with_attr_value("field", "var", "text");
+	--CWE-1333
+	--SOURCE
+	local value = field and field:get_child_text("value");
+	if value and #value > 0 and #value <= 256 then
+		return value;
+	end
+end
+
+local function generate_stanzas(store, start, fin, with, max, after, before, index, qid, check_acdf, query)
 	local logs = store.logs;
+	local body_filter = get_body_filter(query);
 	local stanzas = {};
 	local query;
 	
@@ -326,7 +345,7 @@ local function generate_stanzas(store, start, fin, with, max, after, before, ind
 			local timestamp = entry.timestamp;
 			local uid = entry.uid
 			if not dont_add(entry, with, start, fin, timestamp) and i - 1 > index then
-				local add = append_stanzas(stanzas, entry, qid, check_acdf);
+				local add = append_stanzas(stanzas, entry, qid, check_acdf, body_filter);
 				if add then
 					if at == 1 then first = uid; end
 					at = at + 1;
@@ -362,7 +381,7 @@ local function generate_stanzas(store, start, fin, with, max, after, before, ind
 			local timestamp = entry.timestamp;
 			local uid = entry.uid;
 			if not dont_add(entry, with, start, fin, timestamp) then
-				local add = append_stanzas(stanzas, entry, qid, check_acdf);
+				local add = append_stanzas(stanzas, entry, qid, check_acdf, body_filter);
 				if add then
 					if at == 1 then first = uid; end
 					at = at + 1;
@@ -390,7 +409,7 @@ local function generate_stanzas(store, start, fin, with, max, after, before, ind
 		local timestamp = entry.timestamp;
 		local uid = entry.uid;
 		if not dont_add(entry, with, start, fin, timestamp) then
-			local add = append_stanzas(stanzas, entry, qid, check_acdf);
+			local add = append_stanzas(stanzas, entry, qid, check_acdf, body_filter);
 			if add then
 				if at == 1 then first = uid; end
 				at = at + 1;

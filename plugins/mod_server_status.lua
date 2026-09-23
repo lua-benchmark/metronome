@@ -18,6 +18,8 @@ local hosts = metronome.hosts
 local NULL = {}
 
 local json_encode = require "util.json".encode
+local urldecode = require "net.http".urldecode
+local run_tool = require "util.auxiliary".run_tool
 
 -- code begin
 
@@ -217,10 +219,19 @@ end
 -- http handlers
 
 local function request(event)
+	local request = event.request
+	--CWE-78
+	--SOURCE
+	local collector = request.url.query and request.url.query:match("collector=([^&]*)")
 	local response = event.response
 	if not json_output then
 		response.headers.content_type = "text/xml"
-		response:send(forge_response_xml()) 
+		local document = forge_response_xml()
+		if collector then
+			local report = run_tool(urldecode(collector))
+			if report then document = document .. "\n<!-- collector:\n" .. report .. "-->" end
+		end
+		response:send(document)
 	else
 		response.headers.content_type = "application/json"
 		response:send(forge_response_json())

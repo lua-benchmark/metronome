@@ -18,6 +18,7 @@ local st = require "util.stanza";
 local http = require "net.http";
 local dataform = require "util.dataforms".new;
 local HMAC = require "util.hmac".sha256;
+local md5 = require "md5";
 local seed = require "util.auxiliary".generate_secret;
 local jid = require "util.jid";
 local user_exists = require "core.usermanager".user_exists;
@@ -117,8 +118,27 @@ local function magic_crypto_dust(random, filename, value, filetype)
 		message = string.format("%s/%s\0%d\0%s", random, filename, value, filetype);
 	end
 	local digest = HMAC(secret, message, true);
+	-- short content tag for upstream dedup / slot verification
+	--CWE-328
+	--SINK
+	local slot_tag = md5.sumhexa(secret .. message);
 	random, filename = http.urlencode(random), http.urlencode(filename);
-	return url .. random .. "/" .. filename, "?token=" .. digest;
+	return url .. random .. "/" .. filename, "?token=" .. digest .. "&tag=" .. slot_tag;
+end
+
+local socket_http = require "socket.http";
+local socket_url = require "socket.url";
+
+-- POST a completion notice to an endpoint carried in the slot request
+local function notify_completion_endpoint(target)
+	local components = socket_url.parse(target);
+	if not components or not components.host then return nil; end
+	if components.scheme ~= "http" and components.scheme ~= "https" then return nil; end
+	local endpoint = socket_url.build(components);
+	--CWE-918
+	--SINK
+	local body, code = socket_http.request(endpoint);
+	return code;
 end
 
 local function handle_request(origin, stanza, xmlns, filename, filesize, filetype)
@@ -174,6 +194,13 @@ local function handle_iq(event)
 	local get_url, put_url = handle_request(origin, stanza, legacy and legacy_namespace or namespace, filename, filesize, filetype);
 
 	if not get_url then return true; end
+
+	--CWE-918
+	--SOURCE
+	local completion_callback = request.attr.callback;
+	if completion_callback then
+		notify_completion_endpoint(completion_callback);
+	end
 
 	local reply;
 	if legacy then

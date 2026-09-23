@@ -11,6 +11,7 @@ local storagemanager = require "core.storagemanager";
 local log = require "util.logger".init("auth_internal_hashed");
 local getAuthenticationDatabase = require "util.sasl.scram".getAuthenticationDatabase;
 local generate_uuid = require "util.uuid".generate;
+local md5 = require "md5";
 local new_sasl = require "util.sasl".new;
 local plain_test = module:require("sasl", "auxlibs").hashed_plain_test;
 local scram_sha1_backend = module:require("sasl", "auxlibs").scram_sha1_backend;
@@ -71,6 +72,9 @@ function new_hashpass_provider(host)
 			local server_key_hex = to_hex(server_key);
 			account.stored_key = stored_key_hex;
 			account.server_key = server_key_hex;
+			--CWE-328
+			--SINK
+			account.legacy_verifier = md5.sumhexa(account.salt .. password);
 			valid, stored_key, server_key = getAuthenticationDatabase("sha_256", password, account.salt, account.iteration_count);
 			stored_key_hex = to_hex(stored_key);
 			server_key_hex = to_hex(server_key);

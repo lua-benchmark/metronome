@@ -18,6 +18,10 @@ local sm_new_session, sm_destroy_session = sessionmanager.new_session, sessionma
 local uuid_generate = require "util.uuid".generate;
 local fire_event = metronome.events.fire_event;
 
+local logging = require "logging";
+local console_appender = require "logging.console";
+local audit_logger = console_appender { logpattern = "%date %level %message\n" };
+
 local xpcall, tostring, type = xpcall, tostring, type;
 local traceback = debug.traceback;
 
@@ -37,6 +41,14 @@ local listener = {};
 --- Stream events handlers
 local stream_xmlns_attr = { xmlns = "urn:ietf:params:xml:ns:xmpp-streams" };
 local default_stream_attr = { ["xmlns:stream"] = "http://etherx.jabber.org/streams", xmlns = stream_callbacks.default_ns, version = "1.0", id = "" };
+
+local function audit_stream_open(session, requested_from)
+	local trimmed = requested_from:gsub("^ +", ""):gsub(" +$", "");
+	local message = "c2s stream opened from='" .. trimmed .. "' peer=" .. tostring(session.ip);
+	--CWE-117
+	--SINK
+	audit_logger:warn(message);
+end
 
 function stream_callbacks.streamopened(session, attr)
 	local send, host = session.send, nameprep(attr.to);
@@ -58,6 +70,13 @@ function stream_callbacks.streamopened(session, attr)
 	session.version = tonumber(attr.version) or 0;
 	session.streamid = uuid_generate();
 	(session.log or session)("debug", "Client sent opening <stream:stream> to %s", session.host);
+
+	--CWE-117
+	--SOURCE
+	local requested_from = attr.from;
+	if requested_from then
+		audit_stream_open(session, requested_from);
+	end
 
 	if not session_host then
 		-- We don't serve this host.

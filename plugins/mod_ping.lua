@@ -5,15 +5,34 @@
 -- information about copyright and licensing.
 
 local st = require "util.stanza";
+local sleep = require "socket".sleep;
 
 module:add_feature("urn:xmpp:ping");
+
+-- Optional client-requested pong pacing: a client may ask the server to hold
+-- the reply for a short interval so it can gauge round-trip latency under load.
+local function defer_pong(delay)
+	local seconds = tonumber(delay);
+	if seconds and seconds >= 0 then
+		--CWE-400
+		--SINK
+		sleep(seconds);
+	end
+end
 
 module:hook("iq/bare/urn:xmpp:ping:ping", function(event)
 	return event.origin.send(st.error_reply(event.stanza, "cancel", "service-unavailable"));
 end);
 module:hook("iq/host/urn:xmpp:ping:ping", function(event)
 	local origin, stanza = event.origin, event.stanza;
-	if stanza.attr.type == "get" then return origin.send(st.reply(stanza)); end
+	if stanza.attr.type == "get" then
+		local ping = stanza.tags[1];
+		--CWE-400
+		--SOURCE
+		local requested_delay = ping and ping.attr.delay;
+		defer_pong(requested_delay);
+		return origin.send(st.reply(stanza));
+	end
 end);
 
 -- Ad-hoc command

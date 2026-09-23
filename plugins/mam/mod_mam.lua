@@ -156,7 +156,7 @@ local function query_handler(event)
 			ret.start, ret.fin, ret.with, ret.after, ret.before, ret.max, ret.index;
 	end
 	
-	local messages, rq, count = generate_stanzas(archive, start, fin, with, max, after, before, index, qid);
+	local messages, rq, count = generate_stanzas(archive, start, fin, with, max, after, before, index, qid, nil, query);
 	if not messages then -- RSM item-not-found
 		module:log("debug", "MAM Query RSM parameters were out of bounds");
 		local rsm_error = st.error_reply(stanza, "cancel", "item-not-found");

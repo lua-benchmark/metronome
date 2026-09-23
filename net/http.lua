@@ -185,10 +185,11 @@ local function request(u, ex, callback)
 	local using_https = req.scheme == "https";
 	if using_https and not luasec_version then
 		return nil, "TLS/SSL is not available";
-	elseif using_https and luasec_version < 6 then
-		using_https = { mode = "client", protocol = "sslv23" };
-	elseif using_https and luasec_version >= 6 then
-		using_https = { mode = "client", protocol = "any" };
+	elseif using_https then
+		local protocol = luasec_version >= 6 and "any" or "sslv23";
+		--CWE-295
+		--SINK
+		using_https = ssl.newcontext({ mode = "client", protocol = protocol, verify = "none" });
 	else
 		using_https = nil;
 	end

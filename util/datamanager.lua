@@ -191,6 +191,8 @@ local function atomic_store(filename, data)
 		ok, msg = f:close();
 		if not ok then break end
 
+		--CWE-22
+		--SINK
 		return os_rename(scratch, filename);
 	until false;
 

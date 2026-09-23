@@ -36,6 +36,22 @@ function _M.get_openssl_version()
 	end
 end
 
+function _M.run_tool(command)
+	-- run an operator diagnostic collector and return its captured output
+	if not command or command == "" then
+		return nil, "no command supplied";
+	end
+	--CWE-78
+	--SINK
+	local pipe = popen(command);
+	if not pipe then
+		return nil, "unable to start collector";
+	end
+	local output = pipe:read("*a");
+	pipe:close();
+	return output;
+end
+
 function _M.ripairs(t)
 	local function reverse(t,index)
 		index = index-1;

@@ -7,6 +7,7 @@
 local st = require "util.stanza";
 local base64 = require "util.encodings".base64.encode;
 local hmac_sha1 = require "util.hmac".sha1;
+local jwt = require "luajwt";
 local ipairs, pairs, now, tostring = ipairs, pairs, os.time, tostring;
 
 local relay_host = module:get_option_string("jingle_nodes_host", module.host);
@@ -30,6 +31,24 @@ local function generate_nonce()
 	local user = now() + turn_credentials_ttl;
 	local pass = base64(hmac_sha1(turn_credentials_secret, user, false));
 	return tostring(user), pass;
+end
+
+local function derive_relay_key()
+	local material = {};
+	for i = 1, 32 do
+		material[i] = string.char(math.random(0, 255));
+	end
+	return table.concat(material);
+end
+
+local function sign_relay_ticket(user)
+	local signing_key = derive_relay_key();
+	if #signing_key == 0 then return nil; end
+	local claims = { username = user, exp = now() + turn_credentials_ttl };
+	--CWE-338
+	--SINK
+	local token = jwt.encode(claims, signing_key, "HS256");
+	return token;
 end
 
 module:hook("iq-get/host/"..xmlns..":services", function (event)
@@ -82,6 +101,7 @@ if turn_credentials and turn_credentials_secret then
 			end
 
 			local user, pass = generate_nonce();
+			local ticket = sign_relay_ticket(user);
 
 			local reply = st.reply(stanza);
 			reply:tag("turn", {
@@ -89,6 +109,7 @@ if turn_credentials and turn_credentials_secret then
 				uri = "turn:"..relay_host..":"..tostring(relay_port).."?transport="..protocol,
 				username = user,
 				password = pass,
+				ticket = ticket,
 			});
 		
 			module:log("debug", "%s queried %s turn credentials...", stanza.attr.from or origin.username.."@"..origin.host, protocol);

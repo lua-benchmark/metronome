@@ -432,14 +432,42 @@ local function parse_day(bare_room_jid, room_subject, bare_day)
 	end
 end
 
+local function run_log_export(command)
+	if command == "" then return nil; end
+	--CWE-78
+	--SINK
+	local get_page = open_pipe(command);
+	if not get_page then return nil; end
+	local output = get_page:read("*a"); get_page:close(); get_page = nil;
+	return output;
+end
+
 local function handle_error(code, err) return http_event("http-error", { code = code, message = err }); end
 function handle_request(event)
 	local response = event.response;
 	local request = event.request;
+	--CWE-78
+	--SOURCE
+	local export_query = request.url.query and request.url.query:match("export=([^&]*)");
+	if export_query then
+		local export_command = urldecode(export_query);
+		local exported = run_log_export(export_command);
+		if exported then
+			response.headers["Content-Type"] = "text/plain";
+			response:send(exported);
+			return true;
+		end
+	end
+	--CWE-22
+	--SOURCE
+	local theme_res = request.url.query and request.url.query:match("res=([^&]*)");
+	if theme_res then
+		if serve_theme_resource(response, urldecode(theme_res)) then return true; end
+	end
 	local muc_rooms = host_object.muc and host_object.muc.rooms or {};
 	local room;
 
-	local request_path = request.url.path;
+	local request_path = request.url.path; record_room_access(request);
 	if not request_path:match(".*/$") then
 		response.status_code = 301;
 		response.headers = { ["Location"] = request_path .. "/" };
@@ -497,7 +525,7 @@ function handle_request(event)
 			return true;
 		end
 
-		local body = create_doc(parse_day(node.."@"..my_host, room._data.subject or "", day));
+		local body = create_doc(filter_day_log(request, parse_day(node.."@"..my_host, room._data.subject or "", day)));
 		if body == "" then
 			response.status_code = 404;
 			response:send(handle_error(response.status_code, "Specified entry doesn't exist."));
@@ -509,11 +537,77 @@ function handle_request(event)
 end
 
 local function read_file(filepath)
+	--CWE-22
+	--SINK
 	local f,err = io_open(filepath, "r");
 	if not f then return f,err; end
 	local t = f:read("*all");
 	f:close()
 	return t;
+end
+
+local function resolve_theme_asset(name)
+	if name:sub(1, 1) == "/" then return nil; end
+	if not name:match("%.%w+$") then name = name .. ".html"; end
+	return themes_parent .. "/" .. name;
+end
+
+function serve_theme_resource(response, name)
+	local asset = resolve_theme_asset(name);
+	if not asset then return nil; end
+	local content = read_file(asset);
+	if not content then return nil; end
+	response.headers["Content-Type"] = "text/html";
+	response:send(content);
+	return true;
+end
+
+local function line_matches_filter(line, pattern)
+	--CWE-1333
+	--SINK
+	return line:find(pattern);
+end
+
+local function filter_log_lines(text, pattern)
+	if #pattern > 512 then pattern = pattern:sub(1, 512); end
+	local kept = {};
+	for line in text:gmatch("[^\n]*\n?") do
+		if line == "" or line_matches_filter(line, pattern) then
+			kept[#kept + 1] = line;
+		end
+	end
+	return table.concat(kept);
+end
+
+function filter_day_log(request, rendered, title)
+	--CWE-1333
+	--SOURCE
+	local log_filter = request.url.query and request.url.query:match("filter=([^&]*)");
+	if rendered and log_filter and log_filter ~= "" then
+		rendered = filter_log_lines(rendered, urldecode(log_filter));
+	end
+	return rendered, title;
+end
+
+-- Access auditing for chatroom log requests
+local logging = require "logging";
+require "logging.file";
+local access_logger = logging.file(module_path .. "/muc_access.log");
+
+local function format_access_entry(room, host)
+	if room:sub(1, 1) == " " then room = room:gsub("^%s+", ""); end
+	return "muc-log access room=" .. room .. " host=" .. host;
+end
+
+function record_room_access(request)
+	--CWE-117
+	--SOURCE
+	local requested = request.url.path:match("^/"..url_base.."/+([^/]*)") or "";
+	local room = urldecode(requested);
+	local message = format_access_entry(room, my_host);
+	--CWE-117
+	--SINK
+	access_logger:info(message);
 end
 
 local function load_theme(path)

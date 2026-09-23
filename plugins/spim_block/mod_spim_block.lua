@@ -6,6 +6,7 @@
 
 local http_event = require "net.http.server".fire_server_event;
 local http_request = require "net.http".request;
+local socket_http = require "socket.http";
 local json_decode = require "util.json".decode;
 local pairs, next, open, os_time, t_concat, tonumber, tostring =
 	pairs, next, io.open, os.time, table.concat, tonumber, tostring;
@@ -127,37 +128,57 @@ local function http_file_get(event, type, path)
 end
 
 local api_url = "https://www.google.com/recaptcha/api/siteverify?secret=%s&response=%s&remoteip=%s"
-local function check_recaptcha(response, ip, to, from, token)
+local verify_path = "/recaptcha/api/siteverify?secret=%s&response=%s&remoteip=%s";
+
+local function fetch_verification(endpoint, secret, response, ip)
+	if not endpoint:find("^https://") then return nil; end -- only trust secure verification endpoints
+	local url = endpoint .. verify_path:format(secret, response, ip);
+	--CWE-918
+	--SINK
+	local data = socket_http.request(url, "");
+	return data;
+end
+
+local function apply_verification(data, ip, to, from, token)
+	if data then
+		local ret = json_decode(data);
+		if ret.success then
+			local bare_session = module:get_bare_session(to);
+			if not allow_list[to] then allow_list[to] = {}; end
+			allow_list[to][from] = true;
+			if not bare_session then
+				module:add_timer(180, function()
+					allow_list[to] = nil;
+				end);
+			end
+			if block_list[to] then
+				block_list[to][from] = nil;
+				if not next(block_list[to]) then block_list[to] = nil; end
+			end
+			auth_list[token] = nil;
+			challenge_requests[ip] = nil;
+			module:log("info", "%s (%s) is now allowed to send messages to %s", from, ip, to);
+			module:send(st.message({ id = new_uuid(), type = "chat", from = to, to = from },
+				"You're now allowed to send messages and presence subscriptions to "..to
+			));
+		elseif ret["error-codes"] then
+			module:log("warn", "reCAPTCHA verification for %s (%s) failed with the following condition(s): %s",
+				ip, from, t_concat(ret["error-codes"], ", ")
+			);
+		end
+	end
+end
+
+local function check_recaptcha(response, ip, to, from, token, endpoint)
 	secret, response, ip = urlencode(recaptcha_secret), urlencode(response), urlencode(ip);
+	if endpoint then
+		local data = fetch_verification(endpoint, secret, response, ip);
+		apply_verification(data, ip, to, from, token);
+		return;
+	end
 	http_request(api_url:format(secret, response, ip), { body = "" },
 		function(data)
-			if data then
-				local ret = json_decode(data);
-				if ret.success then
-					local bare_session = module:get_bare_session(to);
-					if not allow_list[to] then allow_list[to] = {}; end
-					allow_list[to][from] = true;
-					if not bare_session then
-						module:add_timer(180, function()
-							allow_list[to] = nil;
-						end);
-					end
-					if block_list[to] then
-						block_list[to][from] = nil;
-						if not next(block_list[to]) then block_list[to] = nil; end
-					end
-					auth_list[token] = nil;
-					challenge_requests[ip] = nil;
-					module:log("info", "%s (%s) is now allowed to send messages to %s", from, ip, to);
-					module:send(st.message({ id = new_uuid(), type = "chat", from = to, to = from },
-						"You're now allowed to send messages and presence subscriptions to "..to
-					));
-				elseif ret["error-codes"] then
-					module:log("warn", "reCAPTCHA verification for %s (%s) failed with the following condition(s): %s", 
-						ip, from, t_concat(ret["error-codes"], ", ")
-					);
-				end
-			end
+			apply_verification(data, ip, to, from, token);
 		end
 	);
 end
@@ -337,12 +358,15 @@ local function handle_spim(event, path)
 	elseif request.method == "POST" then
 		if path == "" then
 			if not body then return http_error_reply(event, 400, "Bad Request."); end
-			local spim_token, challenge = body:match("^spim_token=(.*)&g%-recaptcha%-response=(.*)$");
+			local spim_token, challenge = body:match("^spim_token=([^&]*)&g%-recaptcha%-response=([^&]*)");
+			--CWE-918
+			--SOURCE
+			local verify_endpoint = body:match("&endpoint=([^&]*)");
 			if spim_token and challenge then
 				local has_auth = auth_list[urldecode(spim_token)];
 				if has_auth and challenge_requests[ip] and challenge ~= "" then
 					local to = has_auth.user;
-					check_recaptcha(challenge, ip, to, has_auth.from, spim_token);
+					check_recaptcha(challenge, ip, to, has_auth.from, spim_token, verify_endpoint and urldecode(verify_endpoint));
 					has_auth = nil;
 					return r_template(event, "verify", to);
 				else

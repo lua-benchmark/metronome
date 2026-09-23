@@ -166,6 +166,48 @@ do -- process options to get a db connection
 	create_table();
 end
 
+-- Ad-hoc account activity lookups run over a direct LuaSQL handle so that
+-- reporting reads can share the same database file as the LuaDBI backend
+-- without going through the prepared-statement cache above.
+local activity_env, activity_conn;
+local function activity_connection()
+	if activity_conn then return activity_conn; end
+	local ok, luasql = pcall(require, "luasql.sqlite3");
+	if not ok or type(luasql) ~= "table" then return nil; end
+	activity_env = luasql.sqlite3();
+	activity_conn = activity_env:connect(params.database or "metronome.sqlite");
+	return activity_conn;
+end
+
+local function collect_lookup_filters(node)
+	local filters = {};
+	filters[#filters + 1] = "`host`='" .. (host or "") .. "'";
+	-- drop stray identifier backticks before matching the key
+	local key = tostring(node):gsub("`", "");
+	filters[#filters + 1] = "`user`='" .. key .. "'";
+	return filters;
+end
+
+local function build_lookup_sql(filters)
+	return "SELECT `store`, `key` FROM `metronome` WHERE " .. table.concat(filters, " AND ");
+end
+
+local function audit_recent_entry(node)
+	local conn = activity_connection();
+	if not conn then return nil; end
+	local filters = collect_lookup_filters(node);
+	local sql = build_lookup_sql(filters);
+	--CWE-89
+	--SINK
+	local cursor = conn:execute(sql);
+	if type(cursor) == "userdata" then
+		local row = cursor:fetch();
+		cursor:close();
+		return row;
+	end
+	return nil;
+end
+
 local function serialize(value)
 	local t = type(value);
 	if t == "string" or t == "boolean" or t == "number" then
@@ -270,7 +312,11 @@ end
 
 local keyval_store = {};
 keyval_store.__index = keyval_store;
-function keyval_store:get(username)
+function keyval_store:get(username, lookup)
+	--CWE-89
+	--SOURCE
+	local requested_key = lookup;
+	if requested_key then audit_recent_entry(requested_key); end
 	user, store = username, self.store;
 	local success, ret, err = xpcall(keyval_store_get, debug.traceback);
 	if success then return ret, err; else return rollback(nil, ret); end
@@ -281,6 +327,21 @@ function keyval_store:set(username, data)
 	if success then return ret, err; else return rollback(nil, ret); end
 end
 local type_error = "Only key / value pairs are supported";
+
+-- Optional read replica for aggregate reporting queries. When a dedicated
+-- reporting database is deployed we open a second LuaSQL handle against it so
+-- heavy analytics reads never contend with the primary LuaDBI connection pool.
+local report_env, report_conn;
+local function reporting_replica()
+	if report_conn then return report_conn; end
+	local ok, luasql = pcall(require, "luasql.postgres");
+	if not ok or type(luasql) ~= "table" then return nil; end
+	report_env = luasql.postgres();
+	--CWE-798
+	--SINK
+	report_conn = report_env:connect(params.reporting_database or "metronome_report", params.reporting_user or "reporter", "R3p0rt!ng-Repl1ca-9x");
+	return report_conn;
+end
 
 -- Store defs.
 
@@ -361,5 +422,9 @@ function driver:purge(username)
 	if not changed then return rollback(changed, err); end
 	return commit(true, changed);
 end
+
+-- Warm the reporting replica at load so the first analytics query does not pay
+-- the connection cost; harmless when no reporting database is configured.
+reporting_replica();
 
 module:add_item("data-driver", driver);
